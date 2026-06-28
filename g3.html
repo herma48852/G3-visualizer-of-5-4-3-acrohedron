@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>G3 — non-convex 5-4-3 arcohedron</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0c1018;font-family:-apple-system,system-ui,sans-serif;color:#dfe6f0;}
+  #app{position:fixed;inset:0;}
+  #ui{position:fixed;top:12px;left:12px;z-index:10;background:rgba(18,24,36,.78);
+      backdrop-filter:blur(6px);padding:14px 16px;border-radius:12px;border:1px solid rgba(255,255,255,.08);
+      width:240px;font-size:13px;line-height:1.5;box-shadow:0 8px 30px rgba(0,0,0,.4);}
+  #ui h1{font-size:14px;margin:0 0 8px;font-weight:600;letter-spacing:.5px;}
+  #ui .row{margin:10px 0;}
+  #ui label{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+  #ui input[type=range]{width:140px;vertical-align:middle;}
+  #ui button{width:100%;margin-top:6px;padding:7px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.14);
+      background:#2a3550;color:#eaf0ff;cursor:pointer;font-size:13px;transition:.15s;}
+  #ui button:hover{background:#38486f;}
+  #ui .info{margin-top:10px;font-size:11px;color:#8b97ad;border-top:1px solid rgba(255,255,255,.07);padding-top:8px;}
+  #hint{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);font-size:11px;color:#6b7894;z-index:10;}
+  #status{font-size:11px;color:#7fae7f;margin-top:4px;min-height:14px;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="ui">
+  <h1>G3 arcohedron</h1>
+  <div class="row">
+    <label>Spin speed <span id="spinVal">0.30</span></label>
+    <input id="spin" type="range" min="0" max="2" step="0.01" value="0.30">
+  </div>
+  <div class="row">
+    <button id="colorBtn">🎲 Randomize colors</button>
+    <div id="status">colors: —</div>
+  </div>
+  <div class="row">
+    <button id="resetBtn">Reset view</button>
+  </div>
+  <div class="info">V=13 · E=24 · F=13 · χ=2<br>3 dimple pairs (non-convex)</div>
+</div>
+<div id="hint">drag = orbit · scroll = zoom · right-drag = pan</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ============================================================
+   G3 combinatorial data (verified: every edge has 2 faces, χ=2)
+   vertices:
+     0 = A          (5-5-5)
+     1,2,3 = C1,C2,C3   (4-3-4-3-3)  central triangle
+     4,5,6 = D1,D2,D3   (5-5-3-3)
+     7,9,11 = B1,B3,B5  (5-4-3)  orbit alpha
+     8,10,12 = B2,B4,B6 (5-4-3)  orbit beta
+   ============================================================ */
+const FACES = [
+  [0,4,8,7,5],     // P1 pentagon
+  [0,5,10,9,6],    // P2
+  [0,6,12,11,4],   // P3
+  [1,2,7,8],       // S1 square
+  [2,3,9,10],      // S2
+  [3,1,11,12],     // S3
+  [1,2,3],         // T0 central triangle
+  [1,4,8],         // dimple pair (C1-D1)
+  [1,4,11],
+  [2,5,7],         // dimple pair (C2-D2)
+  [2,5,10],
+  [3,6,9],         // dimple pair (C3-D3)
+  [3,6,12],
+];
+const EDGES = [
+  [0,4],[0,5],[0,6],          // A-D
+  [4,8],[5,10],[6,12],        // D-Bbeta
+  [8,7],[10,9],[12,11],       // Bbeta-Balpha  (shared square/pentagon)
+  [7,5],[9,6],[11,4],         // Balpha-D
+  [1,2],[2,3],[3,1],          // C-C (central tri, shared with squares)
+  [2,7],[3,9],[1,11],         // C-Balpha
+  [8,1],[10,2],[12,3],        // Bbeta-C
+  [1,4],[2,5],[3,6],          // C-D  (dimple creases)
+];
+const DIMPLE_EDGES = [[1,4],[2,5],[3,6]];
+const ORBITS = [[0],[1,2,3],[4,5,6],[7,9,11],[8,10,12]];
+const PLANAR_FACES_IDX = [0,1,2,3,4,5]; // 3 pentagons + 3 squares
+
+/* ============================================================
+   Symmetric seed + spring/planarity relaxation
+   3-fold symmetry about z-axis is enforced every iteration.
+   ============================================================ */
+function rot2(x,y,deg){const a=deg*Math.PI/180,c=Math.cos(a),s=Math.sin(a);return [c*x-s*y,s*x+c*y];}
+
+function seed(rC,rD,rB,zA,zC,zD,zB,angA,angB){
+  const p=new Array(13);
+  p[0]=[0,0,zA];
+  p[1]=[rC,0,zC];
+  p[2]=rot2(p[1][0],p[1][1],120).concat([zC]);
+  p[3]=rot2(p[1][0],p[1][1],240).concat([zC]);
+  p[4]=[rD,0,zD];
+  p[5]=rot2(p[4][0],p[4][1],120).concat([zD]);
+  p[6]=rot2(p[4][0],p[4][1],240).concat([zD]);
+  const ba=rot2(rB,0,angA); p[7]=[ba[0],ba[1],zB];
+  const ba2=rot2(p[7][0],p[7][1],120); p[9]=[ba2[0],ba2[1],zB];
+  const ba3=rot2(p[7][0],p[7][1],240); p[11]=[ba3[0],ba3[1],zB];
+  const bb=rot2(rB,0,angB); p[8]=[bb[0],bb[1],zB];
+  const bb2=rot2(p[8][0],p[8][1],120); p[10]=[bb2[0],bb2[1],zB];
+  const bb3=rot2(p[8][0],p[8][1],240); p[12]=[bb3[0],bb3[1],zB];
+  return p;
+}
+
+function snapSymmetry(pos){
+  pos[0][0]=0; pos[0][1]=0;
+  for(const orb of ORBITS){
+    if(orb.length===1) continue;
+    const ps=orb.map(i=>pos[i]);
+    const z=(ps[0][2]+ps[1][2]+ps[2][2])/3;
+    let r=0; for(const p of ps) r+=Math.hypot(p[0],p[1]); r/=3;
+    const th=Math.atan2(ps[0][1],ps[0][0]);
+    for(let k=0;k<3;k++){
+      const a=th+k*2*Math.PI/3;
+      pos[orb[k]][0]=r*Math.cos(a);
+      pos[orb[k]][1]=r*Math.sin(a);
+      pos[orb[k]][2]=z;
+    }
+  }
+}
+
+function relax(pos, iters){
+  const ke=0.30, kp=0.35;
+  for(let it=0; it<iters; it++){
+    // equal-edge springs (rest length 1)
+    for(const [a,b] of EDGES){
+      const pa=pos[a], pb=pos[b];
+      const dx=pb[0]-pa[0], dy=pb[1]-pa[1], dz=pb[2]-pa[2];
+      const len=Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if(len<1e-9) continue;
+      const f=(len-1)/len*ke;
+      pa[0]+=dx*f; pa[1]+=dy*f; pa[2]+=dz*f;
+      pb[0]-=dx*f; pb[1]-=dy*f; pb[2]-=dz*f;
+    }
+    // planarity of pentagons & squares (project onto best-fit plane)
+    for(const fi of PLANAR_FACES_IDX){
+      const f=FACES[fi];
+      const pts=f.map(i=>pos[i]);
+      let cx=0,cy=0,cz=0;
+      for(const p of pts){cx+=p[0];cy+=p[1];cz+=p[2];}
+      cx/=pts.length; cy/=pts.length; cz/=pts.length;
+      let nx=0,ny=0,nz=0; // Newell
+      for(let i=0;i<pts.length;i++){
+        const a=pts[i], b=pts[(i+1)%pts.length];
+        nx+=(a[1]-b[1])*(a[2]+b[2]);
+        ny+=(a[2]-b[2])*(a[0]+b[0]);
+        nz+=(a[0]-b[0])*(a[1]+b[1]);
+      }
+      const nl=Math.sqrt(nx*nx+ny*ny+nz*nz)||1; nx/=nl; ny/=nl; nz/=nl;
+      for(const i of f){
+        const p=pos[i];
+        const d=(p[0]-cx)*nx+(p[1]-cy)*ny+(p[2]-cz)*nz;
+        p[0]-=nx*d*kp; p[1]-=ny*d*kp; p[2]-=nz*d*kp;
+      }
+    }
+    pos[0][0]=0; pos[0][1]=0;          // A on axis
+    snapSymmetry(pos);                  // enforce 3-fold symmetry
+    // scale lock: mean edge length -> 1
+    if(it%25===0){
+      let sum=0;
+      for(const [a,b] of EDGES){
+        const pa=pos[a],pb=pos[b];
+        sum+=Math.hypot(pb[0]-pa[0],pb[1]-pa[1],pb[2]-pa[2]);
+      }
+      const s=EDGES.length/sum;
+      let cx=0,cy=0,cz=0;
+      for(const p of pos){cx+=p[0];cy+=p[1];cz+=p[2];}
+      cx/=13;cy/=13;cz/=13;
+      for(const p of pos){p[0]=(p[0]-cx)*s+cx;p[1]=(p[1]-cy)*s+cy;p[2]=(p[2]-cz)*s+cz;}
+    }
+  }
+}
+
+/* ---- concavity verification ---- */
+function polyCentroid(pos){let cx=0,cy=0,cz=0;for(const p of pos){cx+=p[0];cy+=p[1];cz+=p[2];}return [cx/13,cy/13,cz/13];}
+function faceCenter(pos,f){let cx=0,cy=0,cz=0;for(const i of f){cx+=pos[i][0];cy+=pos[i][1];cz+=pos[i][2];}return [cx/f.length,cy/f.length,cz/f.length];}
+function newell(pos,f){
+  let nx=0,ny=0,nz=0;
+  for(let i=0;i<f.length;i++){
+    const a=pos[f[i]], b=pos[f[(i+1)%f.length]];
+    nx+=(a[1]-b[1])*(a[2]+b[2]);
+    ny+=(a[2]-b[2])*(a[0]+b[0]);
+    nz+=(a[0]-b[0])*(a[1]+b[1]);
+  }
+  const l=Math.hypot(nx,ny,nz)||1; return [nx/l,ny/l,nz/l];
+}
+function outwardNormal(pos,f,pc){
+  const n=newell(pos,f); const c=faceCenter(pos,f);
+  if((c[0]-pc[0])*n[0]+(c[1]-pc[1])*n[1]+(c[2]-pc[2])*n[2]<0){n[0]=-n[0];n[1]=-n[1];n[2]=-n[2];}
+  return n;
+}
+// edge -> list of face indices
+function buildEdgeFaces(){
+  const m=new Map();
+  const add=(k,fi)=>{if(!m.has(k))m.set(k,[]);m.get(k).push(fi);};
+  for(let fi=0;fi<FACES.length;fi++){
+    const f=FACES[fi];
+    for(let i=0;i<f.length;i++){
+      const a=f[i],b=f[(i+1)%f.length];
+      add(a<b?a+'_'+b:b+'_'+a, fi);
+    }
+  }
+  return m;
+}
+function verifyDimples(pos){
+  const pc=polyCentroid(pos);
+  const ef=buildEdgeFaces();
+  const res=[];
+  for(const e of DIMPLE_EDGES){
+    const key=e[0]<e[1]?e[0]+'_'+e[1]:e[1]+'_'+e[0];
+    const fs=ef.get(key);
+    if(!fs||fs.length!==2){res.push({edge:e,concave:false,reason:'no pair'});continue;}
+    const f1=FACES[fs[0]], f2=FACES[fs[1]];
+    const n1=outwardNormal(pos,f1,pc);
+    const c1=faceCenter(pos,f1);
+    // opposite vertex of f2 = vertex in f2 not on edge
+    const qv=f2.find(v=>!e.includes(v));
+    const q=pos[qv];
+    const s=n1[0]*(q[0]-c1[0])+n1[1]*(q[1]-c1[1])+n1[2]*(q[2]-c1[2]);
+    res.push({edge:e,concave:s>1e-4});
+  }
+  return res;
+}
+function edgeStats(pos){
+  let mx=0,mn=Infinity,sum=0;
+  for(const [a,b] of EDGES){
+    const pa=pos[a],pb=pos[b];
+    const l=Math.hypot(pb[0]-pa[0],pb[1]-pa[1],pb[2]-pa[2]);
+    mx=Math.max(mx,l);mn=Math.min(mn,l);sum+=l;
+  }
+  return {max:mx,min:mn,mean:sum/EDGES.length};
+}
+
+/* ---- try seeds, accept first that yields 3 concave dimples ---- */
+function solveG3(){
+  const variants=[
+    {rC:0.7,rD:0.7,rB:1.10,zA:1.8,zC:-0.8,zD:0.6,zB:0.0,angA:80,angB:40},
+    {rC:0.6,rD:0.6,rB:1.25,zA:1.9,zC:-0.9,zD:0.6,zB:0.0,angA:80,angB:40},
+    {rC:0.5,rD:0.55,rB:1.30,zA:2.0,zC:-1.0,zD:0.55,zB:0.05,angA:78,angB:42},
+    {rC:0.75,rD:0.65,rB:1.15,zA:1.7,zC:-0.7,zD:0.55,zB:-0.05,angA:82,angB:38},
+  ];
+  for(const v of variants){
+    const pos=seed(v.rC,v.rD,v.rB,v.zA,v.zC,v.zD,v.zB,v.angA,v.angB);
+    relax(pos,9000);
+    const dv=verifyDimples(pos);
+    const st=edgeStats(pos);
+    const allConcave=dv.every(d=>d.concave);
+    console.log('seed',v,'stats',st,'dimples',dv);
+    if(allConcave && st.max<1.15 && st.min>0.85) return pos;
+  }
+  // fallback: return best-effort (first) even if not perfect
+  const v=variants[0];
+  const pos=seed(v.rC,v.rD,v.rB,v.zA,v.zC,v.zD,v.zB,v.angA,v.angB);
+  relax(pos,9000);
+  return pos;
+}
+
+const pos = solveG3();
+console.log('G3 solved. edge stats', edgeStats(pos), 'dimples', verifyDimples(pos));
+
+/* ============================================================
+   Build geometry (non-indexed, per-face materials, outward winding)
+   ============================================================ */
+const faceWind = FACES.map(f=>f.slice());
+const pc = polyCentroid(pos);
+// fix each face to outward winding
+for(let fi=0;fi<faceWind.length;fi++){
+  const f=faceWind[fi];
+  const n=newell(pos,f);
+  const c=faceCenter(pos,f);
+  if((c[0]-pc[0])*n[0]+(c[1]-pc[1])*n[1]+(c[2]-pc[2])*n[2]<0) faceWind[fi]=f.slice().reverse();
+}
+
+const geo = new THREE.BufferGeometry();
+const posArr=[], norArr=[];
+const materials=[];
+let vcursor=0;
+for(let fi=0;fi<faceWind.length;fi++){
+  const f=faceWind[fi];
+  const n=outwardNormal(pos,f,pc);
+  for(let t=1;t+1<f.length;t++){
+    for(const vi of [f[0],f[t],f[t+1]]){
+      posArr.push(pos[vi][0],pos[vi][1],pos[vi][2]);
+      norArr.push(n[0],n[1],n[2]);
+    }
+  }
+  const vcount=(f.length-2)*3;
+  geo.addGroup(vcursor,vcount,fi);
+  vcursor+=vcount;
+  materials.push(new THREE.MeshStandardMaterial({color:0x8893a8,flatShading:true,
+    side:THREE.DoubleSide,roughness:0.55,metalness:0.05}));
+}
+geo.setAttribute('position',new THREE.Float32BufferAttribute(posArr,3));
+geo.setAttribute('normal',new THREE.Float32BufferAttribute(norArr,3));
+
+// edge overlay
+const edgePos=[];
+for(const [a,b] of EDGES){
+  edgePos.push(pos[a][0],pos[a][1],pos[a][2],pos[b][0],pos[b][1],pos[b][2]);
+}
+const edgeGeo=new THREE.BufferGeometry();
+edgeGeo.setAttribute('position',new THREE.Float32BufferAttribute(edgePos,3));
+const edgeMat=new THREE.LineBasicMaterial({color:0x0a0e16,transparent:true,opacity:0.55});
+
+/* ============================================================
+   Scene / camera / renderer / controls
+   ============================================================ */
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x0c1018);
+const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.1,100);
+const initCam=new THREE.Vector3(2.6,2.0,3.4);
+const initTarget=new THREE.Vector3(0,0,0.15);
+camera.position.copy(initCam);
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth,innerHeight);
+document.getElementById('app').appendChild(renderer.domElement);
+
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true;
+controls.dampingFactor=0.08;
+controls.minDistance=1.6;
+controls.maxDistance=12;
+controls.target.copy(initTarget);
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff,0x202838,0.9));
+const dir=new THREE.DirectionalLight(0xffffff,1.1); dir.position.set(4,6,5); scene.add(dir);
+const dir2=new THREE.DirectionalLight(0x88aaff,0.4); dir2.position.set(-5,-3,-4); scene.add(dir2);
+
+const group=new THREE.Group();
+const mesh=new THREE.Mesh(geo,materials);
+const lines=new THREE.LineSegments(edgeGeo,edgeMat);
+group.add(mesh); group.add(lines);
+// center the model
+const centerOffset=new THREE.Vector3(pc[0],pc[1],pc[2]);
+group.position.sub(centerOffset);
+scene.add(group);
+
+/* ============================================================
+   Face coloring: randomized backtracking, proper (no 2 adjacent
+   faces share a color). Adjacency = share an edge.
+   ============================================================ */
+const adj = FACES.map(()=>new Set());
+{
+  const ef=buildEdgeFaces(); // uses FACES (same edges as faceWind)
+  for(const list of ef.values()){
+    if(list.length===2){adj[list[0]].add(list[1]);adj[list[1]].add(list[0]);}
+  }
+}
+const PALETTE=[0xe6194b,0x3cb44b,0x4363d8,0xffe119,0xf58231,0x911eb4,0x46f0f9,0xf032e6];
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]];}return a;}
+function tryColor(K){
+  const N=FACES.length;
+  const color=new Array(N).fill(-1);
+  const order=[...Array(N).keys()].sort((a,b)=>adj[b].size-adj[a].size);
+  function bt(idx){
+    if(idx===N) return true;
+    const v=order[idx];
+    const cols=shuffle([...Array(K).keys()]);
+    for(const c of cols){
+      let ok=true;
+      for(const nb of adj[v]) if(color[nb]===c){ok=false;break;}
+      if(ok){color[v]=c; if(bt(idx+1)) return true; color[v]=-1;}
+    }
+    return false;
+  }
+  return bt(0)?color:null;
+}
+function randomizeColors(){
+  let colors=null,K=0;
+  for(let k=4;k<=PALETTE.length;k++){colors=tryColor(k); if(colors){K=k;break;}}
+  if(!colors){ // last resort
+    colors=FACES.map((_,i)=>i%PALETTE.length); K=PALETTE.length;
+  }
+  for(let i=0;i<FACES.length;i++) materials[i].color.setHex(PALETTE[colors[i]%PALETTE.length]);
+  document.getElementById('status').textContent=`colors used: ${K} (proper coloring)`;
+}
+randomizeColors();
+
+/* ============================================================
+   UI wiring
+   ============================================================ */
+const spin=document.getElementById('spin');
+const spinVal=document.getElementById('spinVal');
+let spinSpeed=parseFloat(spin.value);
+spin.addEventListener('input',()=>{spinSpeed=parseFloat(spin.value);spinVal.textContent=spinSpeed.toFixed(2);});
+document.getElementById('colorBtn').addEventListener('click',randomizeColors);
+document.getElementById('resetBtn').addEventListener('click',()=>{
+  camera.position.copy(initCam);
+  controls.target.copy(initTarget);
+  controls.update();
+});
+
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+const clock=new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=clock.getDelta();
+  group.rotation.y+=spinSpeed*dt*Math.PI*2;
+  controls.update();
+  renderer.render(scene,camera);
+}
+animate();
+</script>
+</body>
+</html>
